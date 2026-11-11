@@ -27,11 +27,13 @@ The dataset has 50,530 rows and 5 columns covering 2018-01-01 to 2018-12-31. 2,0
 - No output although wind is above cut-in speed (downtime or curtailment) (1,805 rows, 3.43%).
 - 2,030 expected 10-minute readings are missing (3.86% of the period).
 - Producing less than half of the theoretical power curve (728 rows, 1.39%).
+- 2 extreme outliers in 'Wind Speed (m/s)' (more than 4.0 standard deviations from the mean).
 - Negative active power (turbine consuming grid power while idle) (57 rows, 0.11%).
 - LV ActivePower (kW): best month 2018-08 (1974.69), worst month 2018-07 (477.01).
 - Wind Speed (m/s): best month 2018-03 (9.73), worst month 2018-07 (4.95).
 - LV ActivePower (kW) and Theoretical_Power_Curve (KWh) correlate at r = 0.95.
 - Wind Speed (m/s) and Theoretical_Power_Curve (KWh) correlate at r = 0.944.
+- Worst day (SQL): 2018-01-24, 61.7 MWh lost with 22.3 h of downtime.
 
 ## Data quality findings
 
@@ -40,6 +42,7 @@ The dataset has 50,530 rows and 5 columns covering 2018-01-01 to 2018-12-31. 2,0
 | high | zero_output_in_wind | 1,805 | No output although wind is above cut-in speed (downtime or curtailment) (1,805 rows, 3.43%). |
 | medium | missing_timestamps | 2,030 | 2,030 expected 10-minute readings are missing (3.86% of the period). |
 | medium | severe_underperformance | 728 | Producing less than half of the theoretical power curve (728 rows, 1.39%). |
+| low | outliers_Wind Speed (m/s) | 2 | 2 extreme outliers in 'Wind Speed (m/s)' (more than 4.0 standard deviations from the mean). |
 | low | negative_power | 57 | Negative active power (turbine consuming grid power while idle) (57 rows, 0.11%). |
 
 ## Cleaning steps
@@ -47,6 +50,90 @@ The dataset has 50,530 rows and 5 columns covering 2018-01-01 to 2018-12-31. 2,0
 - Missing values: strategy=interpolate, timestamps added=2030, cells filled=292, cells still empty=7828, rows 50530->52560
 - Flagged 1805 rows as flag_downtime: `LV ActivePower (kW)` <= 0 and `Wind Speed (m/s)` >= 4
 - Flagged 728 rows as flag_underperformance: `LV ActivePower (kW)` > 0 and `LV ActivePower (kW)` < 0.5 * `Theoretical_Power_Curve (KWh)` and `Theoretical_Power_Curve (KWh)` > 500
+
+## SQL: Monthly energy, expected energy and downtime
+
+```sql
+SELECT strftime('%Y-%m', date_time)                          AS month,
+       ROUND(SUM(MAX(lv_activepower_kw, 0)) / 6 / 1000, 1)           AS energy_mwh,
+       ROUND(SUM(MAX(theoretical_power_curve_kwh, 0)) / 6 / 1000, 1) AS expected_mwh,
+       ROUND(100.0 * SUM(MAX(lv_activepower_kw, 0))
+             / SUM(MAX(theoretical_power_curve_kwh, 0)), 1)          AS performance_pct,
+       ROUND(SUM(flag_downtime) / 6.0, 1)                            AS downtime_hours,
+       ROUND(AVG(wind_speed_m_s), 2)                                 AS avg_wind_ms
+FROM readings
+WHERE lv_activepower_kw IS NOT NULL
+GROUP BY month
+ORDER BY month
+```
+
+| month   |   energy_mwh |   expected_mwh |   performance_pct |   downtime_hours |   avg_wind_ms |
+|:--------|-------------:|---------------:|------------------:|-----------------:|--------------:|
+| 2018-01 |        843.4 |         1177   |              71.7 |            101.7 |          8.54 |
+| 2018-02 |       1010.3 |         1150.9 |              87.8 |             47.3 |          8.62 |
+| 2018-03 |       1452.3 |         1544.1 |              94.1 |             20.3 |          9.73 |
+| 2018-04 |        591.5 |          686.7 |              86.1 |             21.7 |          5.85 |
+| 2018-05 |        621.2 |          712.9 |              87.1 |              8   |          5.86 |
+| 2018-06 |        704.7 |          806.5 |              87.4 |              2   |          6.33 |
+| 2018-07 |        354.9 |          434.3 |              81.7 |              2.5 |          4.95 |
+| 2018-08 |       1459.3 |         1639.2 |              89   |              7   |          9.33 |
+| 2018-09 |        953   |         1036   |              92   |              2.3 |          7.58 |
+| 2018-10 |        958.3 |         1044.4 |              91.8 |              1.2 |          7.53 |
+| 2018-11 |       1194.9 |         1285.7 |              92.9 |              5.8 |          9.37 |
+| 2018-12 |        872.7 |         1056.3 |              82.6 |             81   |          7.35 |
+
+## SQL: Where energy is lost, by wind-speed band
+
+```sql
+SELECT (CAST(wind_speed_m_s / 3 AS INT) * 3) || '-'
+         || (CAST(wind_speed_m_s / 3 AS INT) * 3 + 3) || ' m/s'  AS wind_band,
+       COUNT(*)                                                     AS intervals,
+       ROUND(SUM(MAX(theoretical_power_curve_kwh - lv_activepower_kw, 0)) / 6 / 1000, 1)                            AS lost_mwh,
+       SUM(flag_downtime)                                           AS downtime_intervals
+FROM readings
+WHERE lv_activepower_kw IS NOT NULL AND wind_speed_m_s IS NOT NULL
+GROUP BY CAST(wind_speed_m_s / 3 AS INT)
+ORDER BY CAST(wind_speed_m_s / 3 AS INT)
+```
+
+| wind_band   |   intervals |   lost_mwh |   downtime_intervals |
+|:------------|------------:|-----------:|---------------------:|
+| 0-3 m/s     |        7772 |        0   |                    0 |
+| 3-6 m/s     |       12166 |      127.9 |                  549 |
+| 6-9 m/s     |       13614 |      483   |                  687 |
+| 9-12 m/s    |        9372 |      774.4 |                  440 |
+| 12-15 m/s   |        4900 |      172.6 |                  106 |
+| 15-18 m/s   |        1802 |       38.8 |                   23 |
+| 18-21 m/s   |         866 |        6.6 |                    0 |
+| 21-24 m/s   |         103 |        0.4 |                    0 |
+| 24-27 m/s   |           8 |        0   |                    0 |
+
+## SQL: Top 10 days with the most lost energy
+
+```sql
+SELECT date(date_time)                          AS day,
+       ROUND(AVG(wind_speed_m_s), 1)                    AS avg_wind_ms,
+       ROUND(SUM(MAX(theoretical_power_curve_kwh - lv_activepower_kw, 0)) / 6 / 1000, 1)                AS lost_mwh,
+       ROUND(SUM(flag_downtime) / 6.0, 1)               AS downtime_hours
+FROM readings
+WHERE lv_activepower_kw IS NOT NULL
+GROUP BY day
+ORDER BY lost_mwh DESC
+LIMIT 10
+```
+
+| day        |   avg_wind_ms |   lost_mwh |   downtime_hours |
+|:-----------|--------------:|-----------:|-----------------:|
+| 2018-01-24 |           9.8 |       61.7 |             22.3 |
+| 2018-01-25 |           9.4 |       56.5 |             24   |
+| 2018-01-14 |          10.1 |       45.9 |             15.2 |
+| 2018-01-23 |           9.3 |       40.1 |              4.2 |
+| 2018-02-25 |           8.5 |       38.4 |              5.8 |
+| 2018-01-16 |          13.3 |       36.6 |              8.8 |
+| 2018-12-25 |           9.6 |       35   |              0   |
+| 2018-12-05 |          11.5 |       32.8 |             13.3 |
+| 2018-12-19 |           9.9 |       25.1 |              5.7 |
+| 2018-02-26 |           9.4 |       22.3 |             10.5 |
 
 ## Recommendations
 
