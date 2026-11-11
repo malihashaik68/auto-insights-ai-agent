@@ -23,6 +23,7 @@ class Preset:
     flags: list[dict] = field(default_factory=list)
     charts: list[dict] = field(default_factory=list)
     sql_queries: list[dict] = field(default_factory=list)
+    ml: dict | None = None  # kwargs for AnalysisSession.train_anomaly_model
 
 
 P, W, T, D = ("`LV ActivePower (kW)`", "`Wind Speed (m/s)`",
@@ -102,6 +103,9 @@ PRESETS: dict[str, Preset] = {
             {"kind": "histogram", "x": "Wind Speed (m/s)", "title": "Wind speed distribution"},
         ],
         sql_queries=_WIND_SQL,
+        ml={"target_col": "LV ActivePower (kW)",
+            "feature_cols": ["Wind Speed (m/s)", "Wind Direction (°)"],
+            "baseline_col": "Theoretical_Power_Curve (KWh)"},
     ),
 }
 
@@ -147,6 +151,8 @@ def run_offline(session: AnalysisSession, preset: Preset | None = None) -> Narra
     trend_cols = preset.trend_cols or session.numeric_cols[:2]
     if session.time_col and trend_cols:
         session.analyze_trends(trend_cols, "ME")
+    if preset.ml:
+        session.train_anomaly_model(**preset.ml)
     for q in preset.sql_queries or _generic_sql(session):
         session.run_sql(q["query"], title=q["title"], save=True)
     for chart in preset.charts:
@@ -177,6 +183,17 @@ def _narrative(session: AnalysisSession, profile: dict, missing: dict, actual: s
                         f"lowest month {info['worst_period'][:7]} ({info['worst_value']}).")
     for pair in session.eda.get("top_correlations", [])[:2]:
         findings.append(f"{pair['a']} and {pair['b']} correlate at r = {pair['pearson_r']}.")
+    if session.ml:
+        m = session.ml["test_metrics"]
+        line = (f"ML normal-behaviour model predicts {session.ml['target']} with R2 = {m['r2']} "
+                f"(MAE {m['mae']}) on unseen data")
+        if "improvement_vs_baseline_pct" in m:
+            line += f", {m['improvement_vs_baseline_pct']}% more accurate than {m['baseline_column']}"
+        findings.append(line + ".")
+        if session.anomaly_events is not None and len(session.anomaly_events):
+            top = session.anomaly_events.iloc[0]
+            findings.append(f"Largest ML anomaly: {top.get('start', '')} to {top.get('end', '')}, "
+                            f"{top['type']}, output {top['shortfall_pct']}% below expected.")
     for res in session.sql_results:
         if res["title"].startswith("Top 10 days") and not res["result"].empty:
             top = res["result"].iloc[0]
@@ -185,6 +202,9 @@ def _narrative(session: AnalysisSession, profile: dict, missing: dict, actual: s
     recs = ["Investigate the high-severity findings first; they represent lost output."]
     if missing.get("missing_timestamps"):
         recs.append("Fix data logging for the longest gaps so KPIs are not understated.")
+    if session.ml.get("events_with_output"):
+        recs.append("Use the ML anomaly events (turbine running but far below expected output) "
+                    "as early warnings for inspection before they become stoppages.")
     if k.get("underperforming_intervals"):
         recs.append("Review under-performing intervals against maintenance logs.")
     return Narrative(title=f"Auto-Insights Report: {session.name}",

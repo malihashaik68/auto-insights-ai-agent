@@ -20,7 +20,7 @@ sys.path.insert(0, str(ROOT))
 from auto_insights.agent import InsightsAgent  # noqa: E402
 from auto_insights.data_tools import AnalysisSession  # noqa: E402
 from auto_insights.offline import PRESETS, run_offline  # noqa: E402
-from auto_insights.report import build_all, make_figure  # noqa: E402
+from auto_insights.report import build_all, make_figure, ml_figures  # noqa: E402
 
 SAMPLE = ROOT / "data" / "wind_turbine_scada.csv"
 SEV_ICON = {"high": "🔴", "medium": "🟠", "low": "🔵"}
@@ -165,7 +165,8 @@ for col, (label, value, unit) in zip(st.columns(max(len(cards), 1)), cards):
     else:
         col.metric(f"{label} ({unit})" if unit else label, f"{value:,.0f}")
 
-tabs = st.tabs(["Overview", "Data quality", "Charts", "SQL", "Agent trace", "Data & downloads"])
+tabs = st.tabs(["Overview", "Data quality", "Charts", "ML anomalies", "SQL", "Agent trace",
+                "Data & downloads"])
 
 with tabs[0]:
     st.subheader("Executive summary")
@@ -202,6 +203,32 @@ with tabs[2]:
         st.info("No charts were generated.")
 
 with tabs[3]:
+    if not session.ml:
+        st.info("No ML model for this dataset. In agent mode, the LLM decides whether one fits; "
+                "the wind turbine sample trains one automatically.")
+    else:
+        ml, m = session.ml, session.ml["test_metrics"]
+        st.markdown(f"**Normal-behaviour model** predicts `{ml['target']}` from "
+                    f"{', '.join(f'`{f}`' for f in ml['features'])}, trained on "
+                    f"{ml['training_rows']:,} healthy rows only. Validation: {ml['validation']}.")
+        c = st.columns(4)
+        c[0].metric("Test R²", f"{m['r2']:.3f}")
+        c[1].metric("Test MAE", f"{m['mae']:,.1f}")
+        if "improvement_vs_baseline_pct" in m:
+            c[2].metric("Better than baseline", f"{m['improvement_vs_baseline_pct']}%",
+                        help=f"MAE vs {m['baseline_column']} ({m['baseline_mae']})")
+        c[3].metric("Anomaly events", ml["anomaly_events"])
+        st.caption(f"Anomaly rule: {ml['threshold']}, for at least {ml['min_duration_readings']} "
+                   "consecutive readings. 'Underperformance' = still running but far below "
+                   "expected (early warning); 'stoppage' = mostly zero output.")
+        cols = st.columns(2)
+        for i, fig in enumerate(ml_figures(session)):
+            cols[i % 2].plotly_chart(fig, use_container_width=True, theme=None)
+        if session.anomaly_events is not None and len(session.anomaly_events):
+            st.subheader("Anomaly events (largest first)")
+            st.dataframe(session.anomaly_events, hide_index=True, use_container_width=True)
+
+with tabs[4]:
     for r in session.sql_results:
         st.subheader(r["title"])
         st.code(r["query"], language="sql")
@@ -219,7 +246,7 @@ with tabs[3]:
         except ValueError as exc:
             st.error(str(exc))
 
-with tabs[4]:
+with tabs[5]:
     if tool_calls:
         st.write(f"Claude made **{len(tool_calls)} tool calls**, in this order:")
         st.dataframe(pd.DataFrame([{"step": i + 1, "tool": c["tool"], "input": str(c["input"])}
@@ -229,7 +256,7 @@ with tabs[4]:
         st.info("This result came from fast (rule-based) mode. Choose **AI agent** in the "
                 "sidebar to see the LLM plan the analysis step by step.")
 
-with tabs[5]:
+with tabs[6]:
     st.dataframe(session.df.head(500), use_container_width=True)
     out = ROOT / "outputs" / "app"
     paths = build_all(session, narrative, out)

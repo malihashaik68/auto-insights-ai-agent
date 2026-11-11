@@ -10,7 +10,9 @@ from pathlib import Path
 
 import pandas as pd
 import plotly.express as px
+import plotly.graph_objects as go
 import plotly.io as pio
+from plotly.offline import get_plotlyjs
 
 from .data_tools import AnalysisSession
 
@@ -77,6 +79,63 @@ def _kpi_cards(kpis: dict) -> str:
     return "".join(cards)
 
 
+def ml_figures(session: AnalysisSession) -> list:
+    """Charts for the ML section: actual vs expected, and lost output by month."""
+    if not session.ml or "ml_expected" not in session.df:
+        return []
+    target, df, figs = session.ml["target"], session.df, []
+    if session.time_col:
+        daily = df.set_index(session.time_col)[[target, "ml_expected"]].resample("D").mean()
+        fig = go.Figure([
+            go.Scatter(x=daily.index, y=daily["ml_expected"], name="ML expected",
+                       line=dict(color="#9bb3c9", width=2)),
+            go.Scatter(x=daily.index, y=daily[target], name="Actual",
+                       line=dict(color="#0b6e4f", width=1.5))])
+        fig.update_layout(title="Actual vs ML-expected output (daily average)",
+                          template="plotly_white", height=380, margin=dict(l=40, r=20, t=50, b=40),
+                          legend=dict(orientation="h", y=-0.15))
+        figs.append(fig)
+    ev = session.anomaly_events
+    lost = next((c for c in (ev.columns if ev is not None else []) if c.startswith("lost_energy")), None)
+    if lost and "start" in ev and len(ev):
+        by_month = (ev.assign(month=pd.to_datetime(ev["start"]).dt.strftime("%Y-%m"))
+                    .groupby(["month", "type"], as_index=False)[lost].sum())
+        fig = px.bar(by_month, x="month", y=lost, color="type",
+                     color_discrete_map={"stoppage": "#d62728", "underperformance": "#ff9f1c"},
+                     labels={lost: lost.replace("_", " ")})
+        fig.update_layout(title="ML anomaly events: lost output by month", template="plotly_white",
+                          height=380, margin=dict(l=40, r=20, t=50, b=40))
+        figs.append(fig)
+    return figs
+
+
+def _ml_html(session: AnalysisSession) -> str:
+    if not session.ml:
+        return ""
+    m, ml = session.ml["test_metrics"], session.ml
+    rows = [("Model", ml["model"]), ("Predicts", ml["target"]),
+            ("Features", ", ".join(ml["features"])),
+            ("Training rows (healthy data only)", f"{ml['training_rows']:,}"),
+            ("Validation", ml["validation"]),
+            ("Test R²", m["r2"]), ("Test MAE", m["mae"]), ("Test RMSE", m["rmse"])]
+    if "baseline_mae" in m:
+        rows += [(f"Baseline MAE ({m['baseline_column']})", m["baseline_mae"]),
+                 ("Improvement vs baseline", f"{m['improvement_vs_baseline_pct']}%")]
+    rows += [("Anomaly rule", ml["threshold"] + f", at least {ml['min_duration_readings']} "
+              "consecutive readings"), ("Anomaly events", ml["anomaly_events"])]
+    table = "".join(f"<tr><td>{html.escape(str(a))}</td><td>{html.escape(str(b))}</td></tr>"
+                    for a, b in rows)
+    charts = "".join(pio.to_html(f, full_html=False, include_plotlyjs=False,
+                                 default_width="100%", config={"responsive": True})
+                     for i, f in enumerate(ml_figures(session)))
+    ev = session.anomaly_events
+    events = (f"<h3>Largest anomaly events</h3>{ev.head(10).to_html(index=False, border=0)}"
+              if ev is not None and len(ev) else "")
+    return (f"<section><h2>Machine learning: normal-behaviour model &amp; anomaly detection</h2>"
+            f"<table>{table}</table><div class='charts' style='margin-top:16px'>{charts}</div>"
+            f"{events}</section>")
+
+
 def _sql_html(session: AnalysisSession) -> str:
     if not session.sql_results:
         return ""
@@ -90,8 +149,8 @@ def _sql_html(session: AnalysisSession) -> str:
 
 def build_dashboard(session: AnalysisSession, narrative: Narrative, out: Path) -> Path:
     findings = sorted(session.findings, key=lambda f: _SEVERITY_ORDER.get(f.severity, 3))
-    # Embed plotly.js once (first chart) so the dashboard works offline.
-    chart_divs = [pio.to_html(_figure(session, s), full_html=False, include_plotlyjs=(i == 0),
+    # plotly.js is embedded once in <head> so the dashboard works offline.
+    chart_divs = [pio.to_html(_figure(session, s), full_html=False, include_plotlyjs=False,
                               default_width="100%", config={"responsive": True})
                   for i, s in enumerate(session.charts)]
     esc = html.escape
@@ -99,6 +158,7 @@ def build_dashboard(session: AnalysisSession, narrative: Narrative, out: Path) -
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{esc(narrative.title)}</title>
+<script>{get_plotlyjs()}</script>
 <style>
 body{{font-family:-apple-system,Segoe UI,Roboto,sans-serif;margin:0;background:#f5f7fa;color:#1d2733}}
 header{{background:#0b3d3a;color:#fff;padding:24px 32px}}
@@ -139,6 +199,7 @@ footer{{text-align:center;color:#7a8592;font-size:12px;padding:24px}}
 </table>
 <h2 style="margin-top:20px">Cleaning steps applied</h2>
 <ul>{"".join(f"<li>{esc(x)}</li>" for x in session.cleaning_log) or "<li>None</li>"}</ul></section>
+{_ml_html(session)}
 {_sql_html(session)}
 <section><h2>Charts</h2><div class="charts">{"".join(chart_divs)}</div></section>
 </main><footer>Generated by Auto-Insights AI Agent</footer></body></html>"""
@@ -162,6 +223,23 @@ def build_markdown(session: AnalysisSession, narrative: Narrative, out: Path) ->
     for r in session.sql_results:
         lines += ["", f"## SQL: {r['title']}", "", "```sql", r["query"], "```", "",
                   r["result"].to_markdown(index=False)]
+    if session.ml:
+        m = session.ml["test_metrics"]
+        lines += ["", "## Machine learning: normal-behaviour model", "",
+                  f"- Model: {session.ml['model']}, predicts `{session.ml['target']}` from "
+                  f"{', '.join(session.ml['features'])}",
+                  f"- Trained on {session.ml['training_rows']:,} healthy rows; "
+                  f"{session.ml['validation']}",
+                  f"- Test R² = {m['r2']}, MAE = {m['mae']}, RMSE = {m['rmse']}"]
+        if "baseline_mae" in m:
+            lines.append(f"- Baseline ({m['baseline_column']}) MAE = {m['baseline_mae']}: the model "
+                         f"is {m['improvement_vs_baseline_pct']}% more accurate")
+        lines.append(f"- Anomaly rule: {session.ml['threshold']}, at least "
+                     f"{session.ml['min_duration_readings']} consecutive readings; "
+                     f"{session.ml['anomaly_events']} events")
+        if session.anomaly_events is not None and len(session.anomaly_events):
+            lines += ["", "Largest anomaly events:", "",
+                      session.anomaly_events.head(10).to_markdown(index=False)]
     lines += ["", "## Recommendations", ""] + [f"- {x}" for x in narrative.recommendations]
     path = out / "report.md"
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
@@ -176,6 +254,11 @@ def build_excel(session: AnalysisSession, out: Path) -> Path:
             .to_excel(xl, sheet_name="KPIs", index=False)
         pd.DataFrame([f.to_dict() for f in session.findings] or [{}]) \
             .to_excel(xl, sheet_name="DataQuality", index=False)
+        if session.ml:
+            pd.DataFrame([{"metric": k, "value": str(v)} for k, v in session.ml.items()
+                          if k != "largest_events"]).to_excel(xl, sheet_name="ML_Model", index=False)
+        if session.anomaly_events is not None and len(session.anomaly_events):
+            session.anomaly_events.to_excel(xl, sheet_name="ML_Anomalies", index=False)
         for i, r in enumerate(session.sql_results, 1):
             r["result"].to_excel(xl, sheet_name=f"SQL{i}_{r['title'][:24]}"[:31], index=False)
         for col, info in session.trends.get("series", {}).items():
@@ -190,7 +273,8 @@ def build_all(session: AnalysisSession, narrative: Narrative, out_dir: str | Pat
     session.df.to_csv(out / "cleaned_data.csv", index=False)
     (out / "analysis.json").write_text(json.dumps(
         {**session.summary_state(), "trends": session.trends, "eda": session.eda,
-         "sql": [{"title": r["title"], "query": r["query"]} for r in session.sql_results]},
+         "sql": [{"title": r["title"], "query": r["query"]} for r in session.sql_results],
+         "ml": session.ml},
         indent=2, default=str), encoding="utf-8")
     return {
         "dashboard": str(build_dashboard(session, narrative, out)),
