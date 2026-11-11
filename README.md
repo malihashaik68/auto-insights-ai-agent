@@ -6,7 +6,7 @@ An LLM-powered agent that analyses a dataset end to end without a human in the l
 
 The demo runs on **real wind turbine SCADA data**: one year of 10-minute readings from a 3.6 MW turbine. This is the kind of operational data used to monitor wind fleets.
 
-**▶ Live dashboard:** _link added after deployment (see [Deploy the dashboard](#deploy-the-dashboard))_
+**▶ Live dashboard:** **[auto-insights-ai-agent.streamlit.app](https://auto-insights-ai-agent-88y64hdjgghasyy7zpfefq.streamlit.app/)**: open it, click through the tabs, try the SQL box, or upload your own CSV.
 
 ![Interactive dashboard](docs/app_overview.png)
 
