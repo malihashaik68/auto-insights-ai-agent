@@ -7,3 +7,4 @@ python-dotenv>=1.0
 pytest>=8.0
 tabulate>=0.9
 streamlit>=1.40
+google-genai>=1.0

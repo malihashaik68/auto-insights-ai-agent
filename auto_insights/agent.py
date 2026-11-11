@@ -149,7 +149,26 @@ def _dispatch(session: AnalysisSession, name: str, args: dict) -> dict:
     return handlers[name](**args)
 
 
+def user_prompt(session: AnalysisSession, goal: str = "", context: str = "") -> str:
+    return (f"Analyse the dataset '{session.name}' end to end and produce the report."
+            + (f"\n\nBusiness goal: {goal}" if goal else "")
+            + (f"\n\nContext from the user: {context}" if context else ""))
+
+
+def narrative_from(args: dict, generated_by: str) -> Narrative:
+    """Build the report narrative from the write_report tool arguments."""
+    return Narrative(
+        title=args.get("title", "Auto-Insights Report"),
+        executive_summary=args.get("executive_summary", ""),
+        key_findings=[str(x) for x in args.get("key_findings", [])],
+        recommendations=[str(x) for x in args.get("recommendations", [])],
+        generated_by=generated_by,
+    )
+
+
 class InsightsAgent:
+    """Agent backed by Anthropic Claude."""
+
     def __init__(self, session: AnalysisSession, client: anthropic.Anthropic | None = None,
                  model: str = MODEL, log: Callable[[str], None] = print):
         self.session = session
@@ -159,10 +178,8 @@ class InsightsAgent:
         self.tool_calls: list[dict] = []
 
     def run(self, goal: str = "", context: str = "") -> Narrative:
-        user = (f"Analyse the dataset '{self.session.name}' end to end and produce the report."
-                + (f"\n\nBusiness goal: {goal}" if goal else "")
-                + (f"\n\nContext from the user: {context}" if context else ""))
-        messages: list[dict[str, Any]] = [{"role": "user", "content": user}]
+        messages: list[dict[str, Any]] = [
+            {"role": "user", "content": user_prompt(self.session, goal, context)}]
 
         for turn in range(1, MAX_TURNS + 1):
             response = self.client.beta.messages.create(
@@ -195,13 +212,8 @@ class InsightsAgent:
                 self.tool_calls.append({"tool": block.name, "input": args})
                 self.log(f"  [turn {turn}] {block.name}({_short(args)})")
                 if block.name == "write_report":
-                    return Narrative(
-                        title=args.get("title", "Auto-Insights Report"),
-                        executive_summary=args.get("executive_summary", ""),
-                        key_findings=list(args.get("key_findings", [])),
-                        recommendations=list(args.get("recommendations", [])),
-                        generated_by=f"{response.model} (agent, {len(self.tool_calls)} tool calls)",
-                    )
+                    return narrative_from(
+                        args, f"{response.model} (agent, {len(self.tool_calls)} tool calls)")
                 try:
                     output = _dispatch(self.session, block.name, args)
                     results.append({"type": "tool_result", "tool_use_id": block.id,

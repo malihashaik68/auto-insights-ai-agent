@@ -27,20 +27,33 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--preset", choices=sorted(PRESETS), help="Known dataset type (offline rules)")
     p.add_argument("--time-col", default=None, help="Timestamp column (auto-detected if omitted)")
     p.add_argument("--offline", action="store_true", help="Skip the LLM; rule-based pipeline")
+    p.add_argument("--provider", choices=["auto", "claude", "gemini"], default="auto",
+                   help="LLM provider; auto uses whichever API key is set")
     args = p.parse_args(argv)
 
     start = time.time()
     session = AnalysisSession.from_csv(args.csv, time_col=args.time_col)
     print(f"Loaded {args.csv}: {len(session.df):,} rows, time column = {session.time_col}")
 
-    use_llm = not args.offline and (os.getenv("ANTHROPIC_API_KEY") or os.getenv("ANTHROPIC_AUTH_TOKEN"))
-    if use_llm:
+    has_claude = bool(os.getenv("ANTHROPIC_API_KEY") or os.getenv("ANTHROPIC_AUTH_TOKEN"))
+    has_gemini = bool(os.getenv("GEMINI_API_KEY"))
+    provider = args.provider
+    if provider == "auto":
+        provider = "claude" if has_claude else "gemini" if has_gemini else None
+    if args.offline:
+        provider = None
+
+    if provider == "claude":
         from .agent import InsightsAgent
         print("Running Claude agent...")
         narrative = InsightsAgent(session).run(goal=args.goal, context=args.context)
+    elif provider == "gemini":
+        from .agent_gemini import GeminiInsightsAgent
+        print("Running Gemini agent...")
+        narrative = GeminiInsightsAgent(session).run(goal=args.goal, context=args.context)
     else:
         if not args.offline:
-            print("No ANTHROPIC_API_KEY found - running offline (rule-based) mode.")
+            print("No ANTHROPIC_API_KEY or GEMINI_API_KEY found - running offline (rule-based) mode.")
         narrative = run_offline(session, PRESETS.get(args.preset) if args.preset else None)
 
     paths = build_all(session, narrative, args.out)
