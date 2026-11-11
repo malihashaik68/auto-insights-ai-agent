@@ -27,7 +27,7 @@ The demo runs on **real wind turbine SCADA data**: one year of 10-minute reading
 
 ```
            ┌────────────────────────────────────────────────┐
- dataset → │ Claude (claude-opus-5-5) decides the next step │ ← system prompt: "act like a senior analyst"
+ dataset → │ LLM (Claude or Gemini) decides the next step   │ ← system prompt: "act like a senior analyst"
            └───────────────┬────────────────────────────────┘
                            │ tool call (JSON)
                            ▼
@@ -39,10 +39,11 @@ The demo runs on **real wind turbine SCADA data**: one year of 10-minute reading
                            └──────── back to Claude ─── repeat until write_report
 ```
 
-* **The LLM decides, the code calculates.** Claude chooses which tools to run, writes domain rules and SQL, and writes the narrative. Every number comes from pandas or SQLite, so the model cannot make up statistics.
+* **Two LLM providers, one loop:** Anthropic Claude (`agent.py`) or Google Gemini (`agent_gemini.py`, free tier). Both use the same tools and the same prompt, and the app uses whichever key you provide.
+* **The LLM decides, the code calculates.** The LLM chooses which tools to run, writes domain rules and SQL, and writes the narrative. Every number comes from pandas or SQLite, so the model cannot make up statistics.
 * **Hand-written tool-use loop** (`auto_insights/agent.py`), with no framework, so each step is visible and testable. The dashboard's *Agent trace* tab shows every tool call.
 * **Safe by design:** pandas rules allow only column names, numbers and comparison operators. SQL runs under a SQLite authorizer that permits reading only, so `DROP`, `DELETE`, `ATTACH` and multi-statement queries are rejected (see the tests).
-* **Error recovery:** if a tool fails (for example, a wrong column name or bad SQL), the error goes back to Claude as a tool result and it corrects itself.
+* **Error recovery:** if a tool fails (for example, a wrong column name or bad SQL), the error goes back to the LLM as a tool result and it corrects itself.
 * **Fast mode:** without an API key, the same tools run in a fixed order with a rule-based narrative. The project always runs, and the tests need no key.
 
 ## Results on the wind turbine dataset
@@ -91,10 +92,10 @@ Command line, fast mode (no API key needed):
 python -m auto_insights data/wind_turbine_scada.csv --preset wind_turbine
 ```
 
-Command line, Claude agent:
+Command line, AI agent (free Gemini key from https://aistudio.google.com/apikey, or an Anthropic key):
 
 ```bash
-cp .env.example .env        # then paste your Anthropic API key into .env
+cp .env.example .env        # then paste your key into .env
 python -m auto_insights data/wind_turbine_scada.csv --goal "Where is this turbine losing energy?"
 ```
 
@@ -110,7 +111,7 @@ The app runs free on [Streamlit Community Cloud](https://share.streamlit.io):
 
 1. Sign in with GitHub, click **Create app**, then **Deploy a public app from GitHub**.
 2. Repository `malihashaik68/auto-insights-ai-agent`, branch `main`, main file `app.py`.
-3. Optional, to enable the Claude agent: under **Advanced settings → Secrets**, paste the contents of `.streamlit/secrets.toml.example` with your own values. Visitors who enter the access code can then run the agent on your key; anyone else can paste their own key.
+3. Optional, to enable the AI agent: under **Advanced settings → Secrets**, paste the contents of `.streamlit/secrets.toml.example` with your own values (a free Gemini key works). Visitors who enter the access code can then run the agent on your key; anyone else can paste their own key.
 
 ## Tests
 
@@ -118,7 +119,7 @@ The app runs free on [Streamlit Community Cloud](https://share.streamlit.io):
 pytest -q
 ```
 
-20 tests cover profiling, gap detection and filling, rule checks (including rejecting injected code), read-only SQL, a cross-check that SQL monthly energy matches the pandas KPI, the full pipeline, and the agent loop using a fake Claude client. GitHub Actions runs them on every push.
+22 tests cover profiling, gap detection and filling, rule checks (including rejecting injected code), read-only SQL, a cross-check that SQL monthly energy matches the pandas KPI, the full pipeline, and both agent loops (Claude and Gemini) using fake clients. GitHub Actions runs them on every push.
 
 ## Project structure
 
@@ -126,6 +127,7 @@ pytest -q
 app.py                  Streamlit dashboard
 auto_insights/
   agent.py              Claude tool-use loop, tool definitions, system prompt
+  agent_gemini.py       the same loop on Google Gemini
   data_tools.py         pandas analysis tools (the numbers)
   sql_tools.py          read-only SQLite layer
   offline.py            fast rule-based pipeline + wind turbine preset (rules, SQL)
@@ -137,7 +139,7 @@ tests/                  pytest suite
 
 ## Tech stack
 
-Python · Anthropic Claude API (tool use) · SQL (SQLite) · pandas · NumPy · Streamlit · Plotly · openpyxl (Excel / Power BI export) · pytest · GitHub Actions
+Python · Anthropic Claude API & Google Gemini API (tool use / function calling) · SQL (SQLite) · pandas · NumPy · Streamlit · Plotly · openpyxl (Excel / Power BI export) · pytest · GitHub Actions
 
 ## Data source
 
