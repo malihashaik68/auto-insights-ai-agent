@@ -161,3 +161,12 @@ def test_value_at_maximum_is_not_a_stuck_sensor():
     s = AnalysisSession(raw=df, name="cap")
     s.detect_inconsistencies()
     assert not any(f.check.startswith("flatline") for f in s.findings)
+
+
+def test_duplicate_timestamps_are_reported_not_silently_dropped():
+    df = pd.DataFrame({"time": ["2024-01-01 00:00", "2024-01-01 01:00", "2024-01-01 01:00",
+                                "2024-01-01 02:00"], "load": [1.0, 2.0, 2.5, 3.0]})
+    s = AnalysisSession(raw=df, name="dst")
+    r = s.handle_missing_values("interpolate")
+    assert r["duplicate_timestamps_removed"] == 1
+    assert any(f.check == "duplicate_timestamps" for f in s.findings)

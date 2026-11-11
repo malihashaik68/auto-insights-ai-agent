@@ -190,8 +190,9 @@ class AnalysisSession:
                      "duration_hours": _round(r["count"] * interval / pd.Timedelta(hours=1), 1)}
                     for _, r in longest.iterrows()
                 ]
-                if len(missing_ts) / len(expected) > 0.01:
-                    self._add_finding("missing_timestamps", "medium", len(missing_ts),
+                self._add_finding("missing_timestamps",
+                                  "medium" if len(missing_ts) / len(expected) > 0.01 else "low",
+                                  len(missing_ts),
                                       f"{len(missing_ts):,} expected {_fmt_interval(interval)} readings are missing "
                                       f"({result['missing_timestamp_pct']}% of the period).")
         return result
@@ -210,7 +211,13 @@ class AnalysisSession:
         df = self.df
         interval = self._interval()
         added = 0
+        dup_dropped = 0
         if interval is not None and strategy != "drop":
+            dup_dropped = int(df[self.time_col].duplicated().sum())
+            if dup_dropped:  # reindexing needs unique timestamps; keep the first reading
+                self._add_finding("duplicate_timestamps", "medium", dup_dropped,
+                                  f"{dup_dropped} rows repeat an existing timestamp "
+                                  f"(e.g. daylight-saving change); the first reading was kept.")
             df = df.drop_duplicates(subset=self.time_col).set_index(self.time_col)
             full = pd.date_range(df.index.min(), df.index.max(), freq=interval)
             added = len(full) - len(df)
@@ -233,10 +240,12 @@ class AnalysisSession:
             df = df.reset_index()
         self.df = df
         remaining = int(df[num].isna().sum().sum()) if num else 0
-        msg = (f"Missing values: strategy={strategy}, timestamps added={added}, "
+        msg = (f"Missing values: strategy={strategy}, duplicate timestamps removed={dup_dropped}, "
+               f"timestamps added={added}, "
                f"cells filled={filled}, cells still empty={remaining}, rows {before}->{len(df)}")
         self.cleaning_log.append(msg)
-        return {"strategy": strategy, "timestamps_added": added, "cells_filled": filled,
+        return {"strategy": strategy, "duplicate_timestamps_removed": dup_dropped,
+                "timestamps_added": added, "cells_filled": filled,
                 "cells_still_missing": remaining, "rows_before": before, "rows_after": len(df),
                 "note": "Gaps longer than max_gap are left empty on purpose (likely outages)."
                         if strategy == "interpolate" else ""}

@@ -128,8 +128,8 @@ def run_offline(session: AnalysisSession, preset: Preset | None = None) -> Narra
     preset = preset or Preset()
     profile = session.profile_dataset()
     missing = session.analyze_missing_values()
+    session.detect_inconsistencies()  # before cleaning, so duplicates are reported
     session.handle_missing_values("interpolate", max_gap=3)
-    session.detect_inconsistencies()
     for rule in preset.rules:
         session.check_rule(**rule)
     # A domain rule on a column replaces the generic negative-value finding for it.
@@ -173,8 +173,8 @@ def _narrative(session: AnalysisSession, profile: dict, missing: dict, actual: s
     findings = [f.description for f in sorted(session.findings,
                 key=lambda f: {"high": 0, "medium": 1, "low": 2}[f.severity])]
     for col, info in session.trends.get("series", {}).items():
-        findings.append(f"{col}: best month {info['best_period'][:7]} ({info['best_value']}), "
-                        f"worst month {info['worst_period'][:7]} ({info['worst_value']}).")
+        findings.append(f"{col}: highest month {info['best_period'][:7]} ({info['best_value']}), "
+                        f"lowest month {info['worst_period'][:7]} ({info['worst_value']}).")
     for pair in session.eda.get("top_correlations", [])[:2]:
         findings.append(f"{pair['a']} and {pair['b']} correlate at r = {pair['pearson_r']}.")
     for res in session.sql_results:
