@@ -134,11 +134,11 @@ if run:
         if "API_KEY_INVALID" in text or "API key not valid" in text:
             st.error("Google rejected the Gemini API key. Create a new key at "
                      "aistudio.google.com/apikey, copy it with the copy button, and paste it "
-                     "again (in Secrets: `GEMINI_API_KEY = \"AIza...\"`).")
-            if api_key:
-                st.caption(f"The key the app sent starts with `{api_key[:4]}` and is "
-                           f"{len(api_key)} characters long (Gemini keys start with `AIza` "
-                           f"and are 39 characters).")
+                     "again (in Secrets: `GEMINI_API_KEY = \"your-key\"`).")
+        elif "free tier is not available" in text:
+            st.error("This Google project is not eligible for the Gemini free tier. Turn on "
+                     "billing for it at aistudio.google.com/billing, or use Anthropic Claude "
+                     "or fast mode. Fast mode needs no key.")
         else:
             st.error(f"Analysis failed: {text[:500]}")
         st.stop()
