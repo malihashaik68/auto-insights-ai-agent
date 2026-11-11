@@ -31,9 +31,10 @@ st.set_page_config(page_title="Auto-Insights AI Agent", page_icon="📊", layout
 # ---------------------------------------------------------------- data access
 def _secret(name: str) -> str:
     try:
-        return st.secrets.get(name, "") or os.getenv(name, "")
+        value = st.secrets.get(name, "") or os.getenv(name, "")
     except Exception:  # no secrets.toml
-        return os.getenv(name, "")
+        value = os.getenv(name, "")
+    return str(value).strip().strip('"').strip("'").strip()
 
 
 @st.cache_data(show_spinner="Downloading sample dataset...")
@@ -90,13 +91,19 @@ with st.sidebar:
         if owner_key and access_code:
             code = st.text_input("Access code", type="password",
                                  help="Ask the owner for the demo access code.")
-            if code == access_code:
+            if code.strip() == access_code:
                 api_key = owner_key
+                st.caption(f"✅ Using the {secret_name} saved in the app's Secrets.")
+            elif code:
+                st.caption("❌ Access code does not match.")
         elif owner_key:
             api_key = owner_key
+            st.caption(f"✅ Using the {secret_name} saved in the app's Secrets.")
         if not api_key:
             api_key = st.text_input(f"…or your own {'Gemini' if provider == 'gemini' else 'Anthropic'} "
-                                    "API key", type="password")
+                                    "API key", type="password").strip()
+            if not owner_key:
+                st.caption(f"No {secret_name} found in the app's Secrets.")
         goal = st.text_input("Business question (optional)",
                              placeholder="Where is this turbine losing energy?")
     run = st.button("Run analysis", type="primary", use_container_width=True)
@@ -123,7 +130,17 @@ if run:
         st.error("That API key was rejected by Anthropic.")
         st.stop()
     except Exception as exc:
-        st.error(f"Analysis failed: {exc}")
+        text = str(exc)
+        if "API_KEY_INVALID" in text or "API key not valid" in text:
+            st.error("Google rejected the Gemini API key. Create a new key at "
+                     "aistudio.google.com/apikey, copy it with the copy button, and paste it "
+                     "again (in Secrets: `GEMINI_API_KEY = \"AIza...\"`).")
+            if api_key:
+                st.caption(f"The key the app sent starts with `{api_key[:4]}` and is "
+                           f"{len(api_key)} characters long (Gemini keys start with `AIza` "
+                           f"and are 39 characters).")
+        else:
+            st.error(f"Analysis failed: {text[:500]}")
         st.stop()
 
 session, narrative, tool_calls = st.session_state.get("result") or sample_offline_run()
