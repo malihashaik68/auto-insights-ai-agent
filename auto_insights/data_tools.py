@@ -68,6 +68,7 @@ class AnalysisSession:
     trends: dict = field(default_factory=dict)
     eda: dict = field(default_factory=dict)
     charts: list[dict] = field(default_factory=list)
+    sql_results: list[dict] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         self.raw.columns = [str(c).strip().lstrip("﻿") for c in self.raw.columns]
@@ -168,6 +169,9 @@ class AnalysisSession:
             "missing_cells_per_column": per_col,
             "total_missing_cells": int(sum(per_col.values())),
         }
+        for col, n in per_col.items():
+            self._add_finding(f"missing_{col}", "medium" if n / len(df) > 0.05 else "low", n,
+                              f"{n:,} empty values in '{col}' ({100 * n / len(df):.1f}%).")
         interval = self._interval()
         if interval is not None:
             ts = df[self.time_col].dropna()
@@ -269,14 +273,29 @@ class AnalysisSession:
                 n_out = int((z > z_threshold).sum())
                 if n_out:
                     info["extreme_outliers"] = n_out
-            # Sensor stuck on the same value for a long run (ignoring zeros).
+            # Sensor stuck on the same value for a long run. Zeros and the column's
+            # min/max are ignored: sitting at a limit (e.g. rated power) is normal.
             runs = s.ne(s.shift()).cumsum()
             run_len = s.groupby(runs).transform("size")
-            stuck = int(((run_len >= 18) & (s != 0)).sum())
+            at_limit = (s == 0) | (s == s.max()) | (s == s.min())
+            stuck = int(((run_len >= 18) & ~at_limit).sum())
             if stuck:
                 info["flatlined_readings"] = stuck
             if info:
                 per_col[col] = info
+            if info.get("unexpected_negatives"):
+                self._add_finding(f"negative_{col}", "medium", info["unexpected_negatives"],
+                                  f"'{col}' is almost always positive but has "
+                                  f"{info['unexpected_negatives']} negative values "
+                                  f"(min {info['min_value']}).")
+            if info.get("extreme_outliers"):
+                self._add_finding(f"outliers_{col}", "low", info["extreme_outliers"],
+                                  f"{info['extreme_outliers']} extreme outliers in '{col}' "
+                                  f"(more than {z_threshold} standard deviations from the mean).")
+            if info.get("flatlined_readings"):
+                self._add_finding(f"flatline_{col}", "medium", info["flatlined_readings"],
+                                  f"'{col}' repeats the same non-zero value for 18+ readings in a "
+                                  f"row ({info['flatlined_readings']} readings): possible stuck sensor.")
         checks["column_checks"] = per_col
         return {"checks": checks, "note": "Use check_rule to test domain-specific rules."}
 
@@ -429,6 +448,29 @@ class AnalysisSession:
                 "freq": freq}
         self.charts.append(spec)
         return {"queued": spec, "total_charts": len(self.charts)}
+
+    # ------------------------------------------------------------------ SQL
+    def _warehouse(self):
+        from .sql_tools import SQLWarehouse
+        key = (id(self.df), len(self.df), tuple(self.df.columns))
+        if getattr(self, "_wh_key", None) != key:  # rebuild after cleaning/flagging
+            self._wh, self._wh_key = SQLWarehouse(self.df), key
+        return self._wh
+
+    def sql_schema(self) -> dict:
+        """Table and column names available to run_sql."""
+        return self._warehouse().schema()
+
+    def run_sql(self, query: str, title: str = "", save: bool = False) -> dict:
+        """Run a read-only SELECT on table `readings`. save=True puts it in the report."""
+        from .sql_tools import MAX_ROWS
+        result = self._warehouse().query(query)
+        if save:
+            self.sql_results.append({"title": title or "SQL query", "query": query.strip(),
+                                     "result": result.head(MAX_ROWS)})
+        rows = result.head(50).map(_round).to_dict(orient="records")
+        return {"rows_returned": len(result), "rows": rows,
+                "saved_to_report": save, "truncated": len(result) > 50}
 
     # -------------------------------------------------------------- helpers
     def _add_finding(self, check: str, severity: str, rows: int, description: str) -> None:

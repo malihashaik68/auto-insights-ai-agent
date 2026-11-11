@@ -32,8 +32,11 @@ Work like a careful senior analyst:
    readings that contradict each other). Flag suspicious rows with flag_rows
    instead of deleting them.
 4. Run EDA, compute KPIs and analyse trends.
-5. Queue 4-6 charts that a manager would actually look at.
-6. Finish by calling write_report exactly once.
+5. Load the data into SQL (sql_schema) and write 2-4 SQL queries that break the
+   KPIs down (e.g. by month, by operating band, worst days). Save the useful ones
+   to the report with save=true.
+6. Queue 4-6 charts that a manager would actually look at.
+7. Finish by calling write_report exactly once.
 
 Rules: every number you report must come from a tool result. Use the exact column
 names returned by profile_dataset, wrapped in backticks inside conditions.
@@ -94,6 +97,18 @@ TOOLS: list[dict] = [
          "value_cols": {"type": "array", "items": {"type": "string"}},
          "freq": {"type": "string", "enum": ["h", "D", "W", "ME", "QE"]}},
          "required": ["value_cols"]}},
+    {"name": "sql_schema",
+     "description": "Show the SQLite table `readings` (snake_case column names) built from the "
+                    "current cleaned data, including flag columns.",
+     "input_schema": {"type": "object", "properties": {}}},
+    {"name": "run_sql",
+     "description": "Run one read-only SQLite SELECT against table `readings`. Returns up to 50 "
+                    "rows. Set save=true with a title to show the result as a table in the report.",
+     "input_schema": {"type": "object", "properties": {
+         "query": {"type": "string"},
+         "title": {"type": "string"},
+         "save": {"type": "boolean"}},
+         "required": ["query"]}},
     {"name": "add_chart",
      "description": "Queue a chart for the dashboard. For time-series lines pass freq "
                     "(e.g. 'D' or 'W') to resample.",
@@ -126,6 +141,8 @@ def _dispatch(session: AnalysisSession, name: str, args: dict) -> dict:
         "compute_kpis": session.compute_kpis,
         "analyze_trends": session.analyze_trends,
         "add_chart": session.add_chart,
+        "sql_schema": session.sql_schema,
+        "run_sql": session.run_sql,
     }
     if name not in handlers:
         raise ValueError(f"Unknown tool {name}")
