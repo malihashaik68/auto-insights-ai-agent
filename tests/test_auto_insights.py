@@ -111,3 +111,53 @@ def test_agent_runs_tools_and_returns_narrative(session):
     results = next(m["content"] for m in reversed(messages) if m["role"] == "user")
     assert len(results) == 2
     assert results[1]["is_error"] is True
+
+
+# ---------------------------------------------------------------------- SQL
+def test_sql_query_on_cleaned_data(session):
+    session.handle_missing_values("interpolate")
+    schema = session.sql_schema()
+    assert schema["table"] == "readings" and "power" in schema["columns"]
+    r = session.run_sql("SELECT COUNT(*) AS n FROM readings", title="count", save=True)
+    assert r["rows"][0]["n"] == 200
+    assert session.sql_results[0]["title"] == "count"
+
+
+@pytest.mark.parametrize("bad", [
+    "DROP TABLE readings",
+    "DELETE FROM readings",
+    "SELECT 1; DROP TABLE readings",
+    "WITH x AS (SELECT 1) DELETE FROM readings",
+    "ATTACH DATABASE 'evil.db' AS e",
+])
+def test_sql_is_read_only(session, bad):
+    with pytest.raises(ValueError):
+        session.run_sql(bad)
+    assert session.run_sql("SELECT COUNT(*) AS n FROM readings")["rows"][0]["n"] == 197
+
+
+def test_wind_preset_sql_runs():
+    from pathlib import Path
+    from auto_insights.offline import PRESETS
+    csv = Path(__file__).parents[1] / "data" / "wind_turbine_scada.csv"
+    if not csv.exists():
+        pytest.skip("sample dataset not downloaded")
+    s = AnalysisSession.from_csv(csv)
+    run_offline(s, PRESETS["wind_turbine"])
+    monthly = s.sql_results[0]["result"]
+    assert len(monthly) == 12
+    assert abs(monthly["energy_mwh"].sum() - s.kpis["total_energy"] / 1000) < 1
+
+
+def test_generic_issues_become_findings(session):
+    session.analyze_missing_values()
+    session.detect_inconsistencies()
+    checks = {f.check for f in session.findings}
+    assert "negative_power" in checks
+
+
+def test_value_at_maximum_is_not_a_stuck_sensor():
+    df = pd.DataFrame({"x": [1.0, 2.0] + [9.0] * 30 + [3.0, 4.0]})
+    s = AnalysisSession(raw=df, name="cap")
+    s.detect_inconsistencies()
+    assert not any(f.check.startswith("flatline") for f in s.findings)
