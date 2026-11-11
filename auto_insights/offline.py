@@ -22,10 +22,48 @@ class Preset:
     rules: list[dict] = field(default_factory=list)
     flags: list[dict] = field(default_factory=list)
     charts: list[dict] = field(default_factory=list)
+    sql_queries: list[dict] = field(default_factory=list)
 
 
 P, W, T, D = ("`LV ActivePower (kW)`", "`Wind Speed (m/s)`",
               "`Theoretical_Power_Curve (KWh)`", "`Wind Direction (°)`")
+
+# 10-minute readings: kW / 6 = kWh per interval, / 1000 = MWh.
+_LOST = "MAX(theoretical_power_curve_kwh - lv_activepower_kw, 0)"
+_WIND_SQL = [
+    {"title": "Monthly energy, expected energy and downtime",
+     "query": """SELECT strftime('%Y-%m', date_time)                          AS month,
+       ROUND(SUM(MAX(lv_activepower_kw, 0)) / 6 / 1000, 1)           AS energy_mwh,
+       ROUND(SUM(MAX(theoretical_power_curve_kwh, 0)) / 6 / 1000, 1) AS expected_mwh,
+       ROUND(100.0 * SUM(MAX(lv_activepower_kw, 0))
+             / SUM(MAX(theoretical_power_curve_kwh, 0)), 1)          AS performance_pct,
+       ROUND(SUM(flag_downtime) / 6.0, 1)                            AS downtime_hours,
+       ROUND(AVG(wind_speed_m_s), 2)                                 AS avg_wind_ms
+FROM readings
+WHERE lv_activepower_kw IS NOT NULL
+GROUP BY month
+ORDER BY month"""},
+    {"title": "Where energy is lost, by wind-speed band",
+     "query": f"""SELECT (CAST(wind_speed_m_s / 3 AS INT) * 3) || '-'
+         || (CAST(wind_speed_m_s / 3 AS INT) * 3 + 3) || ' m/s'  AS wind_band,
+       COUNT(*)                                                     AS intervals,
+       ROUND(SUM({_LOST}) / 6 / 1000, 1)                            AS lost_mwh,
+       SUM(flag_downtime)                                           AS downtime_intervals
+FROM readings
+WHERE lv_activepower_kw IS NOT NULL AND wind_speed_m_s IS NOT NULL
+GROUP BY CAST(wind_speed_m_s / 3 AS INT)
+ORDER BY CAST(wind_speed_m_s / 3 AS INT)"""},
+    {"title": "Top 10 days with the most lost energy",
+     "query": f"""SELECT date(date_time)                          AS day,
+       ROUND(AVG(wind_speed_m_s), 1)                    AS avg_wind_ms,
+       ROUND(SUM({_LOST}) / 6 / 1000, 1)                AS lost_mwh,
+       ROUND(SUM(flag_downtime) / 6.0, 1)               AS downtime_hours
+FROM readings
+WHERE lv_activepower_kw IS NOT NULL
+GROUP BY day
+ORDER BY lost_mwh DESC
+LIMIT 10"""},
+]
 
 PRESETS: dict[str, Preset] = {
     "wind_turbine": Preset(
@@ -63,8 +101,27 @@ PRESETS: dict[str, Preset] = {
              "title": "Weekly average wind speed (m/s)"},
             {"kind": "histogram", "x": "Wind Speed (m/s)", "title": "Wind speed distribution"},
         ],
+        sql_queries=_WIND_SQL,
     ),
 }
+
+
+def _generic_sql(session: AnalysisSession) -> list[dict]:
+    """Monthly summary query for any dataset with a timestamp."""
+    if not session.time_col or not session.numeric_cols:
+        return []
+    from .sql_tools import TABLE, sql_name
+    t = sql_name(session.time_col)
+    cols = [sql_name(c) for c in session.numeric_cols[:4] if not c.startswith("flag_")]
+    aggs = ",\n       ".join(f"ROUND(AVG({c}), 2) AS avg_{c}, ROUND(SUM({c}), 2) AS total_{c}"
+                             for c in cols)
+    return [{"title": "Monthly summary",
+             "query": f"""SELECT strftime('%Y-%m', {t}) AS month,
+       COUNT(*) AS records,
+       {aggs}
+FROM {TABLE}
+GROUP BY month
+ORDER BY month"""}]
 
 
 def run_offline(session: AnalysisSession, preset: Preset | None = None) -> Narrative:
@@ -75,6 +132,10 @@ def run_offline(session: AnalysisSession, preset: Preset | None = None) -> Narra
     session.detect_inconsistencies()
     for rule in preset.rules:
         session.check_rule(**rule)
+    # A domain rule on a column replaces the generic negative-value finding for it.
+    if any(r["name"] == "negative_power" for r in preset.rules) and preset.actual_col:
+        session.findings = [f for f in session.findings
+                            if f.check != f"negative_{preset.actual_col}"]
     for flag in preset.flags:
         session.flag_rows(**flag)
     session.run_eda()
@@ -86,6 +147,8 @@ def run_offline(session: AnalysisSession, preset: Preset | None = None) -> Narra
     trend_cols = preset.trend_cols or session.numeric_cols[:2]
     if session.time_col and trend_cols:
         session.analyze_trends(trend_cols, "ME")
+    for q in preset.sql_queries or _generic_sql(session):
+        session.run_sql(q["query"], title=q["title"], save=True)
     for chart in preset.charts:
         session.add_chart(**chart)
     if not preset.charts and actual:
@@ -114,6 +177,11 @@ def _narrative(session: AnalysisSession, profile: dict, missing: dict, actual: s
                         f"worst month {info['worst_period'][:7]} ({info['worst_value']}).")
     for pair in session.eda.get("top_correlations", [])[:2]:
         findings.append(f"{pair['a']} and {pair['b']} correlate at r = {pair['pearson_r']}.")
+    for res in session.sql_results:
+        if res["title"].startswith("Top 10 days") and not res["result"].empty:
+            top = res["result"].iloc[0]
+            findings.append(f"Worst day (SQL): {top['day']}, {top['lost_mwh']} MWh lost "
+                            f"with {top['downtime_hours']} h of downtime.")
     recs = ["Investigate the high-severity findings first; they represent lost output."]
     if missing.get("missing_timestamps"):
         recs.append("Fix data logging for the longest gaps so KPIs are not understated.")
