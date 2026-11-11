@@ -32,11 +32,16 @@ Work like a careful senior analyst:
    readings that contradict each other). Flag suspicious rows with flag_rows
    instead of deleting them.
 4. Run EDA, compute KPIs and analyse trends.
-5. Load the data into SQL (sql_schema) and write 2-4 SQL queries that break the
+5. If there is an output column that depends on measurable conditions, call
+   train_anomaly_model (target = output, features = the driving conditions, never
+   the target itself or a value derived from it; baseline = an expected/theoretical
+   column if one exists). Flag known bad rows with flag_rows FIRST so the model
+   trains on healthy data only. Report its test metrics and the largest events.
+6. Load the data into SQL (sql_schema) and write 2-4 SQL queries that break the
    KPIs down (e.g. by month, by operating band, worst days). Save the useful ones
    to the report with save=true.
-6. Queue 4-6 charts that a manager would actually look at.
-7. Finish by calling write_report exactly once.
+7. Queue 4-6 charts that a manager would actually look at.
+8. Finish by calling write_report exactly once.
 
 Rules: every number you report must come from a tool result. Use the exact column
 names returned by profile_dataset, wrapped in backticks inside conditions.
@@ -97,6 +102,22 @@ TOOLS: list[dict] = [
          "value_cols": {"type": "array", "items": {"type": "string"}},
          "freq": {"type": "string", "enum": ["h", "D", "W", "ME", "QE"]}},
          "required": ["value_cols"]}},
+    {"name": "train_anomaly_model",
+     "description": "Machine learning: train a gradient-boosted normal-behaviour model that "
+                    "predicts target_col from feature_cols using only healthy rows (rows with "
+                    "any flag_* column set are excluded), validated on the last 25% of the "
+                    "period. Then flag sustained periods where the actual value is far below "
+                    "the prediction. Returns test metrics (MAE, R2, improvement vs baseline) "
+                    "and the largest anomaly events.",
+     "input_schema": {"type": "object", "properties": {
+         "target_col": {"type": "string"},
+         "feature_cols": {"type": "array", "items": {"type": "string"}},
+         "baseline_col": {"type": "string",
+                          "description": "Optional existing expected-value column to beat."},
+         "threshold_sigma": {"type": "number", "description": "Default 3."},
+         "min_duration": {"type": "integer",
+                          "description": "Minimum consecutive readings per event. Default 6."}},
+         "required": ["target_col", "feature_cols"]}},
     {"name": "sql_schema",
      "description": "Show the SQLite table `readings` (snake_case column names) built from the "
                     "current cleaned data, including flag columns.",
@@ -141,6 +162,7 @@ def _dispatch(session: AnalysisSession, name: str, args: dict) -> dict:
         "compute_kpis": session.compute_kpis,
         "analyze_trends": session.analyze_trends,
         "add_chart": session.add_chart,
+        "train_anomaly_model": session.train_anomaly_model,
         "sql_schema": session.sql_schema,
         "run_sql": session.run_sql,
     }

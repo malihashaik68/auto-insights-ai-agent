@@ -69,6 +69,8 @@ class AnalysisSession:
     eda: dict = field(default_factory=dict)
     charts: list[dict] = field(default_factory=list)
     sql_results: list[dict] = field(default_factory=list)
+    ml: dict = field(default_factory=dict)
+    anomaly_events: pd.DataFrame | None = None
 
     def __post_init__(self) -> None:
         self.raw.columns = [str(c).strip().lstrip("﻿") for c in self.raw.columns]
@@ -457,6 +459,41 @@ class AnalysisSession:
                 "freq": freq}
         self.charts.append(spec)
         return {"queued": spec, "total_charts": len(self.charts)}
+
+    # ------------------------------------------------------------------- ML
+    def train_anomaly_model(self, target_col: str, feature_cols: list[str],
+                            baseline_col: str | None = None, threshold_sigma: float = 3.0,
+                            min_duration: int = 6) -> dict:
+        """Train a normal-behaviour ML model on healthy rows and flag long periods
+        where the actual value is far below what the model expects."""
+        from .ml_tools import train_and_detect
+        self._require_columns(target_col, baseline_col, *feature_cols)
+        if target_col in feature_cols:
+            raise ValueError("target_col must not be one of the feature_cols")
+        if not 1 <= threshold_sigma <= 10 or not 1 <= min_duration <= 1000:
+            raise ValueError("threshold_sigma must be 1-10 and min_duration 1-1000")
+        interval = self._interval()
+        hours = interval / pd.Timedelta(hours=1) if interval is not None else None
+        summary, events, pred = train_and_detect(
+            self.df, target_col, feature_cols, self.time_col, hours, baseline_col,
+            threshold_sigma, min_duration)
+        self.df["ml_expected"] = pred.round(2)
+        self.df["ml_residual"] = (self.df[target_col] - pred).round(2)
+        unit = re.search(r"\b(kW|MW)\b", target_col, re.I)
+        if unit and "lost_energy" in events:  # power in kW/MW integrated over hours
+            events = events.rename(columns={"lost_energy": f"lost_energy_{unit.group(1)}h"})
+        self.ml, self.anomaly_events = summary, events
+        m = summary["test_metrics"]
+        self.cleaning_log.append(
+            f"ML normal-behaviour model trained on {summary['training_rows']:,} healthy rows "
+            f"(test R2 = {m['r2']}, MAE = {m['mae']}); added ml_expected and ml_residual columns.")
+        if len(events):
+            self._add_finding("ml_anomalies", "high", summary["anomalous_readings"],
+                              f"ML model flagged {len(events)} periods where {target_col} stayed "
+                              f"far below its expected value "
+                              f"({summary.get('events_with_output', 0)} while still running, "
+                              f"{summary.get('events_stopped', 0)} stoppages).")
+        return summary
 
     # ------------------------------------------------------------------ SQL
     def _warehouse(self):
