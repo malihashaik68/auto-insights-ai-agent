@@ -53,13 +53,18 @@ def sample_offline_run():
 
 
 def run_analysis(raw: pd.DataFrame, name: str, use_agent: bool, api_key: str, goal: str,
-                 preset: str | None):
+                 preset: str | None, provider: str = "gemini"):
     session = AnalysisSession(raw=raw.copy(), name=name)
     if not use_agent:
         return session, run_offline(session, PRESETS.get(preset) if preset else None), []
-    with st.status("Claude agent is analysing the data...", expanded=True) as status:
-        agent = InsightsAgent(session, client=anthropic.Anthropic(api_key=api_key),
-                              log=lambda msg: st.write(f"`{msg.strip()}`"))
+    log = lambda msg: st.write(f"`{msg.strip()}`")  # noqa: E731
+    label = "Gemini" if provider == "gemini" else "Claude"
+    with st.status(f"{label} agent is analysing the data...", expanded=True) as status:
+        if provider == "gemini":
+            from auto_insights.agent_gemini import GeminiInsightsAgent
+            agent = GeminiInsightsAgent(session, api_key=api_key, log=log)
+        else:
+            agent = InsightsAgent(session, client=anthropic.Anthropic(api_key=api_key), log=log)
         narrative = agent.run(goal=goal)
         status.update(label=f"Agent finished: {len(agent.tool_calls)} tool calls",
                       state="complete", expanded=False)
@@ -73,19 +78,25 @@ with st.sidebar:
     source = st.radio("Dataset", ["Sample: wind turbine SCADA (2018)", "Upload a CSV"])
     upload = st.file_uploader("CSV file", type="csv") if source == "Upload a CSV" else None
 
-    mode = st.radio("Analysis mode", ["Fast (rule-based)", "Claude AI agent"],
+    mode = st.radio("Analysis mode", ["Fast (rule-based)", "AI agent"],
                     help="Fast mode runs the same tools in a fixed order. "
-                         "Agent mode lets Claude plan the analysis, write rules and SQL.")
-    api_key, goal = "", ""
-    if mode == "Claude AI agent":
-        owner_key, access_code = _secret("ANTHROPIC_API_KEY"), _secret("AGENT_ACCESS_CODE")
+                         "Agent mode lets the LLM plan the analysis, write rules and SQL.")
+    api_key, goal, provider = "", "", "gemini"
+    if mode == "AI agent":
+        provider = st.radio("LLM provider", ["gemini", "claude"], horizontal=True,
+                            format_func={"gemini": "Google Gemini", "claude": "Anthropic Claude"}.get)
+        secret_name = "GEMINI_API_KEY" if provider == "gemini" else "ANTHROPIC_API_KEY"
+        owner_key, access_code = _secret(secret_name), _secret("AGENT_ACCESS_CODE")
         if owner_key and access_code:
             code = st.text_input("Access code", type="password",
                                  help="Ask the owner for the demo access code.")
             if code == access_code:
                 api_key = owner_key
+        elif owner_key:
+            api_key = owner_key
         if not api_key:
-            api_key = st.text_input("…or your own Anthropic API key", type="password")
+            api_key = st.text_input(f"…or your own {'Gemini' if provider == 'gemini' else 'Anthropic'} "
+                                    "API key", type="password")
         goal = st.text_input("Business question (optional)",
                              placeholder="Where is this turbine losing energy?")
     run = st.button("Run analysis", type="primary", use_container_width=True)
@@ -102,11 +113,12 @@ if run:
             raw, name, preset = pd.read_csv(upload, encoding="utf-8-sig"), Path(upload.name).stem, None
         else:
             raw, name, preset = load_sample(), "wind_turbine_scada", "wind_turbine"
-        use_agent = mode == "Claude AI agent"
+        use_agent = mode == "AI agent"
         if use_agent and not api_key:
             st.sidebar.error("Agent mode needs an access code or an API key.")
             st.stop()
-        st.session_state.result = run_analysis(raw, name, use_agent, api_key, goal, preset)
+        st.session_state.result = run_analysis(raw, name, use_agent, api_key, goal, preset,
+                                               provider)
     except anthropic.AuthenticationError:
         st.error("That API key was rejected by Anthropic.")
         st.stop()
@@ -197,8 +209,8 @@ with tabs[4]:
                                    for i, c in enumerate(tool_calls)]),
                      hide_index=True, use_container_width=True)
     else:
-        st.info("This result came from fast (rule-based) mode. Choose **Claude AI agent** in the "
-                "sidebar to see the agent plan the analysis step by step.")
+        st.info("This result came from fast (rule-based) mode. Choose **AI agent** in the "
+                "sidebar to see the LLM plan the analysis step by step.")
 
 with tabs[5]:
     st.dataframe(session.df.head(500), use_container_width=True)
