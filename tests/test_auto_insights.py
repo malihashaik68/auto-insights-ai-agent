@@ -206,3 +206,48 @@ def test_gemini_agent_loop(session):
     assert [r.id for r in responses] == ["1", "2"]
     assert "error" in responses[1].response and "result" in responses[0].response
     assert session.sql_results[0]["result"]["n"][0] == 197
+
+
+# ----------------------------------------------------------------------- ML
+def _turbine(days=60, fault=("2024-02-10", "2024-02-12")):
+    ts = pd.date_range("2024-01-01", periods=days * 144, freq="10min")
+    rng = np.random.default_rng(42)
+    wind = np.clip(8 + 3 * np.sin(np.arange(len(ts)) / 300) + rng.normal(0, 1.5, len(ts)), 0, 25)
+    power = np.clip(3000 / (1 + np.exp(-(wind - 9))) + rng.normal(0, 40, len(ts)), 0, 3000)
+    df = pd.DataFrame({"time": ts, "Wind Speed (m/s)": wind, "Power (kW)": power,
+                       "Wind Direction (°)": rng.uniform(0, 360, len(ts))})
+    in_fault = (df["time"] >= fault[0]) & (df["time"] < fault[1])
+    df.loc[in_fault, "Power (kW)"] *= 0.4  # running at 40% of normal output
+    return df, in_fault
+
+
+def test_ml_model_finds_injected_fault():
+    df, in_fault = _turbine()
+    s = AnalysisSession(raw=df, name="synthetic")
+    r = s.train_anomaly_model("Power (kW)", ["Wind Speed (m/s)", "Wind Direction (°)"])
+    assert r["test_metrics"]["r2"] > 0.9
+    assert "Wind Direction (°)_sin" in r["features"]  # angle encoded as sin/cos
+    ev = s.anomaly_events
+    assert len(ev) >= 1 and ev.iloc[0]["type"] == "underperformance"
+    assert ev.iloc[0]["start"].startswith("2024-02-1")
+    assert "lost_energy_kWh" in ev.columns
+    # Most fault readings are caught, and very few healthy readings are flagged.
+    flagged = s.df["ml_residual"] < -3 * r["residual_sigma"]
+    assert flagged[in_fault].mean() > 0.6
+    assert flagged[~in_fault].mean() < 0.02
+
+
+def test_ml_rejects_target_as_feature():
+    df, _ = _turbine(days=10)
+    s = AnalysisSession(raw=df, name="leak")
+    with pytest.raises(ValueError):
+        s.train_anomaly_model("Power (kW)", ["Power (kW)", "Wind Speed (m/s)"])
+
+
+def test_ml_excludes_flagged_rows_from_training():
+    df, in_fault = _turbine()
+    s = AnalysisSession(raw=df, name="flags")
+    s.df["flag_fault"] = in_fault.values
+    r = s.train_anomaly_model("Power (kW)", ["Wind Speed (m/s)"])
+    assert r["excluded_flag_columns"] == ["flag_fault"]
+    assert r["training_rows"] + r["test_rows"] == int((~in_fault).sum())
