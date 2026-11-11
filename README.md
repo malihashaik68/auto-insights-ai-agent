@@ -2,7 +2,7 @@
 
 ![tests](https://github.com/malihashaik68/auto-insights-ai-agent/actions/workflows/tests.yml/badge.svg)
 
-An LLM-powered agent that analyses a dataset end to end without a human in the loop. It profiles the data, handles missing values, flags inconsistencies, runs exploratory data analysis and SQL KPI queries, and produces an interactive dashboard and report.
+An LLM-powered agent that analyses a dataset end to end without a human in the loop. It profiles the data, handles missing values, flags inconsistencies, runs exploratory data analysis and SQL KPI queries, trains a machine-learning model to detect anomalies, and produces an interactive dashboard and report.
 
 The demo runs on **real wind turbine SCADA data**: one year of 10-minute readings from a 3.6 MW turbine. This is the kind of operational data used to monitor wind fleets.
 
@@ -19,6 +19,7 @@ The demo runs on **real wind turbine SCADA data**: one year of 10-minute reading
 | **Inconsistencies** | Runs generic checks (duplicates, negatives, z-score outliers, stuck sensors), then the agent writes **domain rules** such as "no output although wind is above cut-in speed" |
 | **EDA** | Distributions, skew, IQR outliers, strongest correlations |
 | **SQL** | Loads the cleaned data into a SQLite database. KPIs are broken down with SQL (monthly energy and downtime, losses by wind band, worst days), and the agent can write its own queries |
+| **Machine learning** | Trains a gradient-boosted **normal-behaviour model** on healthy data only (known faults excluded), validated on a later time period it never saw. Then it flags sustained periods where output falls far below what the model expects: early warnings of faults or degradation |
 | **KPIs** | Energy, capacity factor, performance ratio vs. expected output, availability, under-performing intervals |
 | **Trends** | Monthly, weekly or daily aggregation with best/worst periods and the linear trend |
 | **Deliverables** | Interactive Streamlit dashboard, standalone HTML dashboard, Markdown report, Excel workbook (ready for Power BI or Excel), cleaned CSV |
@@ -43,6 +44,7 @@ The demo runs on **real wind turbine SCADA data**: one year of 10-minute reading
 * **The LLM decides, the code calculates.** The LLM chooses which tools to run, writes domain rules and SQL, and writes the narrative. Every number comes from pandas or SQLite, so the model cannot make up statistics.
 * **Hand-written tool-use loop** (`auto_insights/agent.py`), with no framework, so each step is visible and testable. The dashboard's *Agent trace* tab shows every tool call.
 * **Safe by design:** pandas rules allow only column names, numbers and comparison operators. SQL runs under a SQLite authorizer that permits reading only, so `DROP`, `DELETE`, `ATTACH` and multi-statement queries are rejected (see the tests).
+* **No data leakage in the ML:** chronological train/test split (no shuffling), target never used as a feature, and anomaly thresholds come from training data only.
 * **Error recovery:** if a tool fails (for example, a wrong column name or bad SQL), the error goes back to the LLM as a tool result and it corrects itself.
 * **Fast mode:** without an API key, the same tools run in a fixed order with a rule-based narrative. The project always runs, and the tests need no key.
 
@@ -62,6 +64,20 @@ What the analysis found:
 * **Most energy is lost at 9–12 m/s wind (SQL)**: 774 MWh, more than any other wind band.
 * Worst single day: 2018-01-24, with 61.7 MWh lost and 22.3 h of downtime.
 * 728 intervals producing less than half of the theoretical power curve, and 57 negative power readings.
+
+### Machine learning: normal-behaviour model
+
+| | |
+|---|---|
+| Model | Gradient-boosted trees (scikit-learn `HistGradientBoostingRegressor`), predicts power from wind speed and direction (sin/cos encoded) |
+| Training data | 36,052 healthy readings (Jan–Sep); downtime and under-performance excluded |
+| Test (Oct–Dec, unseen) | **R² = 0.988, MAE = 84 kW**, **31% more accurate** than the manufacturer's theoretical power curve (MAE 122 kW) |
+| Anomaly rule | actual < expected − 3σ (robust σ from training residuals) for ≥ 1 hour |
+| Result | **157 anomaly events**: 115 where the turbine was **still running but far below expected** (early warnings) and 42 stoppages |
+
+Lost output in anomaly events peaks in January and December. In December it is mostly under-performance rather than stoppage, which is consistent with icing. Example: 2018-12-25, 31 hours at 22% of expected output.
+
+![ML anomalies](docs/app_ml.png)
 
 Full output: [`docs/sample_report.md`](docs/sample_report.md)
 
@@ -119,7 +135,7 @@ The app runs free on [Streamlit Community Cloud](https://share.streamlit.io):
 pytest -q
 ```
 
-22 tests cover profiling, gap detection and filling, rule checks (including rejecting injected code), read-only SQL, a cross-check that SQL monthly energy matches the pandas KPI, the full pipeline, and both agent loops (Claude and Gemini) using fake clients. GitHub Actions runs them on every push.
+25 tests cover profiling, gap detection and filling, rule checks (including rejecting injected code), read-only SQL, the ML model (finds an injected fault, rejects target leakage, excludes flagged rows), a cross-check that SQL monthly energy matches the pandas KPI, the full pipeline, and both agent loops (Claude and Gemini) using fake clients. GitHub Actions runs them on every push.
 
 ## Project structure
 
@@ -129,6 +145,7 @@ auto_insights/
   agent.py              Claude tool-use loop, tool definitions, system prompt
   agent_gemini.py       the same loop on Google Gemini
   data_tools.py         pandas analysis tools (the numbers)
+  ml_tools.py           normal-behaviour ML model + anomaly detection
   sql_tools.py          read-only SQLite layer
   offline.py            fast rule-based pipeline + wind turbine preset (rules, SQL)
   report.py             HTML dashboard, Markdown report, Excel workbook
@@ -139,7 +156,7 @@ tests/                  pytest suite
 
 ## Tech stack
 
-Python · Anthropic Claude API & Google Gemini API (tool use / function calling) · SQL (SQLite) · pandas · NumPy · Streamlit · Plotly · openpyxl (Excel / Power BI export) · pytest · GitHub Actions
+Python · Anthropic Claude API & Google Gemini API (tool use / function calling) · SQL (SQLite) · scikit-learn · pandas · NumPy · Streamlit · Plotly · openpyxl (Excel / Power BI export) · pytest · GitHub Actions
 
 ## Data source
 

@@ -25,14 +25,17 @@ The dataset has 50,530 rows and 5 columns covering 2018-01-01 to 2018-12-31. 2,0
 ## Key findings
 
 - No output although wind is above cut-in speed (downtime or curtailment) (1,805 rows, 3.43%).
+- ML model flagged 157 periods where LV ActivePower (kW) stayed far below its expected value (115 while still running, 42 stoppages).
 - 2,030 expected 10-minute readings are missing (3.86% of the period).
 - Producing less than half of the theoretical power curve (728 rows, 1.39%).
 - 2 extreme outliers in 'Wind Speed (m/s)' (more than 4.0 standard deviations from the mean).
 - Negative active power (turbine consuming grid power while idle) (57 rows, 0.11%).
-- LV ActivePower (kW): best month 2018-08 (1974.69), worst month 2018-07 (477.01).
-- Wind Speed (m/s): best month 2018-03 (9.73), worst month 2018-07 (4.95).
+- LV ActivePower (kW): highest month 2018-08 (1974.69), lowest month 2018-07 (477.01).
+- Wind Speed (m/s): highest month 2018-03 (9.73), lowest month 2018-07 (4.95).
 - LV ActivePower (kW) and Theoretical_Power_Curve (KWh) correlate at r = 0.95.
 - Wind Speed (m/s) and Theoretical_Power_Curve (KWh) correlate at r = 0.944.
+- ML normal-behaviour model predicts LV ActivePower (kW) with R2 = 0.9875 (MAE 83.94) on unseen data, 31.4% more accurate than Theoretical_Power_Curve (KWh).
+- Largest ML anomaly: 2018-01-22 19:10:00 to 2018-01-26 02:40:00, stoppage, output 89.7% below expected.
 - Worst day (SQL): 2018-01-24, 61.7 MWh lost with 22.3 h of downtime.
 
 ## Data quality findings
@@ -40,6 +43,7 @@ The dataset has 50,530 rows and 5 columns covering 2018-01-01 to 2018-12-31. 2,0
 | Severity | Check | Rows | Detail |
 |---|---|---|---|
 | high | zero_output_in_wind | 1,805 | No output although wind is above cut-in speed (downtime or curtailment) (1,805 rows, 3.43%). |
+| high | ml_anomalies | 3,435 | ML model flagged 157 periods where LV ActivePower (kW) stayed far below its expected value (115 while still running, 42 stoppages). |
 | medium | missing_timestamps | 2,030 | 2,030 expected 10-minute readings are missing (3.86% of the period). |
 | medium | severe_underperformance | 728 | Producing less than half of the theoretical power curve (728 rows, 1.39%). |
 | low | outliers_Wind Speed (m/s) | 2 | 2 extreme outliers in 'Wind Speed (m/s)' (more than 4.0 standard deviations from the mean). |
@@ -47,9 +51,10 @@ The dataset has 50,530 rows and 5 columns covering 2018-01-01 to 2018-12-31. 2,0
 
 ## Cleaning steps
 
-- Missing values: strategy=interpolate, timestamps added=2030, cells filled=292, cells still empty=7828, rows 50530->52560
+- Missing values: strategy=interpolate, duplicate timestamps removed=0, timestamps added=2030, cells filled=292, cells still empty=7828, rows 50530->52560
 - Flagged 1805 rows as flag_downtime: `LV ActivePower (kW)` <= 0 and `Wind Speed (m/s)` >= 4
 - Flagged 728 rows as flag_underperformance: `LV ActivePower (kW)` > 0 and `LV ActivePower (kW)` < 0.5 * `Theoretical_Power_Curve (KWh)` and `Theoretical_Power_Curve (KWh)` > 500
+- ML normal-behaviour model trained on 36,052 healthy rows (test R2 = 0.9875, MAE = 83.94); added ml_expected and ml_residual columns.
 
 ## SQL: Monthly energy, expected energy and downtime
 
@@ -135,8 +140,32 @@ LIMIT 10
 | 2018-12-19 |           9.9 |       25.1 |              5.7 |
 | 2018-02-26 |           9.4 |       22.3 |             10.5 |
 
+## Machine learning: normal-behaviour model
+
+- Model: HistGradientBoostingRegressor (absolute-error loss), predicts `LV ActivePower (kW)` from Wind Speed (m/s), Wind Direction (°)_sin, Wind Direction (°)_cos
+- Trained on 36,052 healthy rows; chronological split: first 75% train, last 25% test
+- Test R² = 0.9875, MAE = 83.94, RMSE = 147.94
+- Baseline (Theoretical_Power_Curve (KWh)) MAE = 122.28: the model is 31.4% more accurate
+- Anomaly rule: actual < predicted - 3.0 x 38.7, at least 6 consecutive readings; 157 events
+
+Largest anomaly events:
+
+| start               | end                 |   duration_hours | type             |   readings |   avg_actual |   avg_expected |   shortfall_pct |   lost_energy_kWh |
+|:--------------------|:--------------------|-----------------:|:-----------------|-----------:|-------------:|---------------:|----------------:|------------------:|
+| 2018-01-22 19:10:00 | 2018-01-26 02:40:00 |             79.7 | stoppage         |        478 |        219.5 |         2124.5 |            89.7 |          151764   |
+| 2018-01-13 20:40:00 | 2018-01-15 05:10:00 |             32.7 | stoppage         |        196 |        287.4 |         1992.2 |            85.6 |           55690.4 |
+| 2018-02-24 23:50:00 | 2018-02-26 10:20:00 |             34.7 | underperformance |        208 |        191.2 |         1654.8 |            88.4 |           50737.7 |
+| 2018-12-25 05:30:00 | 2018-12-26 12:10:00 |             30.8 | underperformance |        185 |        422.1 |         1882   |            77.6 |           45013.6 |
+| 2018-01-16 01:10:00 | 2018-01-16 10:30:00 |              9.5 | stoppage         |         57 |         87.1 |         3570.5 |            97.6 |           33092.6 |
+| 2018-12-04 21:40:00 | 2018-12-05 13:20:00 |             15.8 | stoppage         |         95 |         15.2 |         2083.9 |            99.3 |           32754.1 |
+| 2018-12-19 04:10:00 | 2018-12-20 07:50:00 |             27.8 | underperformance |        167 |        582   |         1519.5 |            61.7 |           26094.1 |
+| 2018-02-23 06:00:00 | 2018-02-23 14:30:00 |              8.7 | stoppage         |         52 |         48.7 |         2049.1 |            97.6 |           17337   |
+| 2018-11-30 09:40:00 | 2018-12-01 00:20:00 |             14.8 | underperformance |         89 |        970.9 |         1895.1 |            48.8 |           13708.8 |
+| 2018-01-30 16:50:00 | 2018-01-30 21:10:00 |              4.5 | stoppage         |         27 |         20.7 |         2690.4 |            99.2 |           12013.8 |
+
 ## Recommendations
 
 - Investigate the high-severity findings first; they represent lost output.
 - Fix data logging for the longest gaps so KPIs are not understated.
+- Use the ML anomaly events (turbine running but far below expected output) as early warnings for inspection before they become stoppages.
 - Review under-performing intervals against maintenance logs.
