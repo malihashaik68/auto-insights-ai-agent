@@ -170,3 +170,39 @@ def test_duplicate_timestamps_are_reported_not_silently_dropped():
     r = s.handle_missing_values("interpolate")
     assert r["duplicate_timestamps_removed"] == 1
     assert any(f.check == "duplicate_timestamps" for f in s.findings)
+
+
+# ------------------------------------------------------------- Gemini agent
+def test_gemini_agent_loop(session):
+    from google.genai import types
+    from auto_insights.agent_gemini import GeminiInsightsAgent
+
+    def reply(*calls):
+        parts = [types.Part(function_call=types.FunctionCall(id=i, name=n, args=a))
+                 for i, n, a in calls]
+        return types.GenerateContentResponse(candidates=[types.Candidate(
+            content=types.Content(role="model", parts=parts))])
+
+    turns = [
+        reply(("1", "profile_dataset", {}), ("2", "run_sql", {"query": "DROP TABLE readings"})),
+        reply(("3", "run_sql", {"query": "SELECT COUNT(*) AS n FROM readings", "save": True,
+                                "title": "count"})),
+        reply(("4", "write_report", {"title": "G", "executive_summary": "S",
+                                     "key_findings": ["f"], "recommendations": ["r"]})),
+    ]
+    sent = []
+
+    def generate_content(model, contents, config):
+        sent.append(list(contents))
+        return turns.pop(0)
+
+    client = SimpleNamespace(models=SimpleNamespace(generate_content=generate_content))
+    agent = GeminiInsightsAgent(session, client=client, model="test-model", log=lambda _: None)
+    narrative = agent.run()
+
+    assert narrative.title == "G" and "test-model" in narrative.generated_by
+    # Tool results go back as function responses with matching ids; bad SQL becomes an error.
+    responses = [p.function_response for p in sent[1][-1].parts]
+    assert [r.id for r in responses] == ["1", "2"]
+    assert "error" in responses[1].response and "result" in responses[0].response
+    assert session.sql_results[0]["result"]["n"][0] == 197
